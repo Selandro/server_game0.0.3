@@ -67,14 +67,27 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	clients[conn] = true
+	// Генерация нового playerID
 	playerID := len(players) + 1
+
+	// Отправка playerID клиенту
+	err = conn.WriteJSON(map[string]interface{}{
+		"playerID": playerID,
+	})
+	if err != nil {
+		log.Println("Ошибка при отправке playerID:", err)
+		return
+	}
+
+	// Добавляем нового игрока
+	clients[conn] = true
 	players[playerID] = &Player{
 		ID: playerID,
 		X:  400,
 		Y:  400,
 	}
 
+	// Чтение и обработка сообщений от клиента
 	for {
 		var msg map[string]interface{}
 		err := conn.ReadJSON(&msg)
@@ -85,6 +98,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		// Обработка сообщений, связанных с действиями игрока
 		if id, ok := msg["id"].(float64); ok {
 			player := players[int(id)]
 
@@ -176,7 +190,7 @@ func applyPush(player *Player) {
 
 		// Применяем отталкивание с плавным перемещением
 		go func() {
-			steps := 5                     // Количество шагов для плавного перемещения
+			steps := 10                    // Количество шагов для плавного перемещения
 			delay := 16 * time.Millisecond // Задержка между шагами
 
 			for i := 0; i < steps; i++ {
@@ -229,7 +243,7 @@ func applyPull(player *Player) {
 
 		// Применяем плавное притяжение
 		go func() {
-			steps := 5                     // Количество шагов для плавного перемещения
+			steps := 10                    // Количество шагов для плавного перемещения
 			delay := 16 * time.Millisecond // Задержка между шагами
 
 			for i := 0; i < steps; i++ {

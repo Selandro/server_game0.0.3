@@ -47,7 +47,7 @@ var (
 	mutex   = &sync.Mutex{}
 	udpAddr = net.UDPAddr{
 		Port: 8080,
-		IP:   net.ParseIP("localhost"),
+		IP:   net.ParseIP("0.0.0.0"),
 	}
 )
 
@@ -62,7 +62,7 @@ func main() {
 	go gameLoop()
 	go checkCapturePoints()
 
-	buffer := make([]byte, 1024)
+	buffer := make([]byte, 2048)
 	for {
 		n, addr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
@@ -327,43 +327,66 @@ func getPlayersState() []Player {
 
 func checkCapturePoints() {
 	for {
-		time.Sleep(1 * time.Second)
-
 		mutex.Lock()
+
+		// Логика захвата точек
 		for i := range capturePoints {
-			capturePoint := &capturePoints[i]
-			if !capturePoint.IsCaptured {
-				for _, player := range players {
-					distance := math.Sqrt(math.Pow(player.X-capturePoint.X, 2) + math.Pow(player.Y-capturePoint.Y, 2))
-					if distance < capturePoint.Radius {
-						if capturePoint.CapturingPlayer == 0 {
-							capturePoint.CapturingPlayer = player.ID
-							capturePoint.EnterTime = time.Now()
-							log.Printf("Игрок %d вошел в зону захвата", player.ID)
-						} else if capturePoint.CapturingPlayer == player.ID {
-							if time.Since(capturePoint.EnterTime) > 5*time.Second {
-								capturePoint.IsCaptured = true
-								log.Printf("Игрок %d захватил точку", player.ID)
-								if player.ID == 1 {
-									points1++
-								} else {
-									points2++
-								}
-							}
-						} else {
-							capturePoint.CapturingPlayer = player.ID
-							capturePoint.EnterTime = time.Now()
-							log.Printf("Игрок %d захватил точку", player.ID)
-						}
-						break
+			cp := &capturePoints[i]
+
+			player1InZone := isPlayerInZone(players[1], cp)
+			player2InZone := isPlayerInZone(players[2], cp)
+
+			if player1InZone && player2InZone {
+				cp.EnterTime = time.Time{} // Сброс таймера, если оба игрока в зоне
+			} else if player1InZone {
+				if cp.EnterTime.IsZero() {
+					cp.EnterTime = time.Now()
+				}
+				if time.Since(cp.EnterTime) >= 5*time.Second {
+					cp.IsCaptured = true
+					cp.CapturingPlayer = 1
+					cp.CaptureStart = time.Now()
+					cp.EnterTime = time.Time{} // Сброс таймера захвата
+				}
+			} else if player2InZone {
+				if cp.EnterTime.IsZero() {
+					cp.EnterTime = time.Now()
+				}
+				if time.Since(cp.EnterTime) >= 5*time.Second {
+					cp.IsCaptured = true
+					cp.CapturingPlayer = 2
+					cp.CaptureStart = time.Now()
+					cp.EnterTime = time.Time{} // Сброс таймера захвата
+				}
+			} else {
+				cp.EnterTime = time.Time{} // Сброс таймера, если игрок вышел из зоны
+			}
+
+			// Начисление очков за захваченные точки
+			if cp.IsCaptured {
+				if cp.CapturingPlayer == 1 {
+					if time.Since(cp.CaptureStart) >= 5*time.Second {
+						points1++
+						cp.CaptureStart = time.Now() // Обновляем время последнего начисления очков
+					}
+				} else if cp.CapturingPlayer == 2 {
+					if time.Since(cp.CaptureStart) >= 5*time.Second {
+						points2++
+						cp.CaptureStart = time.Now() // Обновляем время последнего начисления очков
 					}
 				}
-			} else if capturePoint.IsCaptured && capturePoint.CapturingPlayer != 0 {
-				capturePoint.CapturingPlayer = 0
-				capturePoint.EnterTime = time.Time{}
-				log.Printf("Точка захвата потеряна")
 			}
 		}
+
 		mutex.Unlock()
+
 	}
+
+}
+func isPlayerInZone(player *Player, cp *CapturePoint) bool {
+	if player == nil {
+		return false
+	}
+	distance := math.Sqrt(math.Pow(player.X-cp.X, 2) + math.Pow(player.Y-cp.Y, 2))
+	return distance <= cp.Radius
 }

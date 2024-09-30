@@ -1,13 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"math"
-	"net/http"
+	"net"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 type Player struct {
@@ -36,82 +35,102 @@ type GameState struct {
 }
 
 var (
-	clients       = make(map[*websocket.Conn]bool)
+	conn          *net.UDPConn // Глобальная переменная для UDP соединения
 	players       = make(map[int]*Player)
+	clientAddrs   = make(map[int]*net.UDPAddr) // Хранение адресов клиентов
 	capturePoints = []CapturePoint{
 		{X: 300, Y: 200, Radius: 50},
 		{X: 800, Y: 600, Radius: 50},
 	}
-	points1  = 0
-	points2  = 0
-	mutex    = &sync.Mutex{}
-	upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
+	points1 = 0
+	points2 = 0
+	mutex   = &sync.Mutex{}
+	udpAddr = net.UDPAddr{
+		Port: 8080,
+		IP:   net.ParseIP("localhost"),
 	}
-	lastUpdate = time.Now()
 )
 
 func main() {
-	http.HandleFunc("/ws", handleConnections)
-	go gameLoop()
-	log.Fatal(http.ListenAndServe(":8080", nil))
-}
-
-func handleConnections(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	var err error
+	conn, err = net.ListenUDP("udp", &udpAddr)
 	if err != nil {
-		log.Println("Ошибка при апгрейде соединения:", err)
-		return
+		log.Fatal("Ошибка при прослушивании UDP:", err)
 	}
 	defer conn.Close()
 
-	// Генерация нового playerID
-	playerID := len(players) + 1
+	go gameLoop()
+	go checkCapturePoints()
 
-	// Отправка playerID клиенту
-	err = conn.WriteJSON(map[string]interface{}{
-		"playerID": playerID,
-	})
-	if err != nil {
-		log.Println("Ошибка при отправке playerID:", err)
+	buffer := make([]byte, 1024)
+	for {
+		n, addr, err := conn.ReadFromUDP(buffer)
+		if err != nil {
+			log.Println("Ошибка при чтении UDP:", err)
+			continue
+		}
+
+		var msg map[string]interface{}
+		if err := json.Unmarshal(buffer[:n], &msg); err != nil {
+			log.Println("Ошибка при разборе JSON:", err)
+			continue
+		}
+
+		handleUDPMessage(addr, msg)
+	}
+}
+
+func handleUDPMessage(addr *net.UDPAddr, msg map[string]interface{}) {
+	playerID := 0
+	if id, ok := msg["id"].(float64); ok {
+		playerID = int(id)
+	} else {
+		// Если id не указан, присваиваем новый ID
+		mutex.Lock()
+		playerID = len(players) + 1
+		players[playerID] = &Player{
+			ID: playerID,
+			X:  400,
+			Y:  400,
+		}
+		clientAddrs[playerID] = addr // Сохраняем адрес клиента
+		log.Printf("Игрок %d подключился", playerID)
+		mutex.Unlock()
+
+		// Отправляем присвоенный playerID обратно клиенту
+		response := map[string]interface{}{
+			"id": playerID,
+		}
+		sendUDPMessage(addr, response)
 		return
 	}
 
-	// Добавляем нового игрока
-	clients[conn] = true
-	players[playerID] = &Player{
-		ID: playerID,
-		X:  400,
-		Y:  400,
+	player := players[playerID]
+
+	// Обработка сообщений, связанных с действиями игрока
+	if x, ok := msg["x"].(float64); ok {
+		player.X = x
+	}
+	if y, ok := msg["y"].(float64); ok {
+		player.Y = y
+	}
+	if action, ok := msg["action"].(string); ok {
+		handleAction(player, action)
 	}
 
-	// Чтение и обработка сообщений от клиента
-	for {
-		var msg map[string]interface{}
-		err := conn.ReadJSON(&msg)
-		if err != nil {
-			log.Println("Ошибка при чтении сообщения:", err)
-			delete(clients, conn)
-			delete(players, playerID)
-			break
-		}
+	// Отправка состояния игры обратно игроку
+	sendGameState(addr)
+}
 
-		// Обработка сообщений, связанных с действиями игрока
-		if id, ok := msg["id"].(float64); ok {
-			player := players[int(id)]
-
-			if x, ok := msg["x"].(float64); ok {
-				player.X = x
-			}
-			if y, ok := msg["y"].(float64); ok {
-				player.Y = y
-			}
-			if action, ok := msg["action"].(string); ok {
-				handleAction(player, action)
-			}
-		}
+func sendUDPMessage(addr *net.UDPAddr, msg map[string]interface{}) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Println("Ошибка сериализации сообщения:", err)
+		return
+	}
+	_, err = conn.WriteToUDP(data, addr)
+	if err != nil {
+		log.Println("Ошибка отправки сообщения клиенту:", err)
 	}
 }
 
@@ -125,20 +144,16 @@ func handleAction(player *Player, action string) {
 			player.LastPushTime = currentTime
 			log.Printf("Игрок %d использовал push", player.ID)
 			applyPush(player)
-			broadcastGameState() // Обновляем состояние игры после push
 		}
 	case "pull":
 		if currentTime.Sub(player.LastPullTime) > cooldown {
 			player.LastPullTime = currentTime
 			log.Printf("Игрок %d использовал pull", player.ID)
 			applyPull(player)
-			broadcastGameState() // Обновляем состояние игры после pull
 		}
 	}
 }
-
-// Функция для отправки обновленного состояния всем клиентам
-func broadcastGameState() {
+func sendGameState(addr *net.UDPAddr) {
 	mutex.Lock()
 	defer mutex.Unlock()
 
@@ -149,16 +164,23 @@ func broadcastGameState() {
 		Points2:       points2,
 	}
 
-	for client := range clients {
-		err := client.WriteJSON(gameState)
-		if err != nil {
-			log.Println("Ошибка при отправке состояния игры:", err)
-			client.Close()
-			delete(clients, client)
-		}
+	data, err := json.Marshal(gameState)
+	if err != nil {
+		log.Println("Ошибка при сериализации состояния игры:", err)
+		return
+	}
+
+	// Проверка, что адрес клиента существует в клиентских адресах
+	if addr == nil {
+		log.Println("Ошибка: адрес клиента nil")
+		return
+	}
+
+	_, err = conn.WriteToUDP(data, addr)
+	if err != nil {
+		log.Println("Ошибка при отправке состояния игры:", err)
 	}
 }
-
 func applyPush(player *Player) {
 	// Ищем ближайшего игрока
 	var closestPlayer *Player
@@ -195,9 +217,6 @@ func applyPush(player *Player) {
 
 			for i := 0; i < steps; i++ {
 				mutex.Lock()
-
-				// Логгируем текущее состояние
-				log.Printf("Applying push to target: %d (step %d)\n", closestPlayer.ID, i+1)
 
 				// Обновляем позицию
 				closestPlayer.X += (dx / distance) * pushStrength / float64(steps)
@@ -249,9 +268,6 @@ func applyPull(player *Player) {
 			for i := 0; i < steps; i++ {
 				mutex.Lock()
 
-				// Логгируем текущее состояние
-				log.Printf("Applying pull to target: %d (step %d)\n", closestPlayer.ID, i+1)
-
 				// Обновляем позицию
 				closestPlayer.X += (dx / distance) * pullStrength / float64(steps)
 				closestPlayer.Y += (dy / distance) * pullStrength / float64(steps)
@@ -266,7 +282,6 @@ func applyPull(player *Player) {
 }
 
 func gameLoop() {
-	go checkCapturePoints()
 	for {
 		time.Sleep(16 * time.Millisecond)
 		mutex.Lock()
@@ -278,12 +293,23 @@ func gameLoop() {
 			Points2:       points2,
 		}
 
-		for client := range clients {
-			err := client.WriteJSON(gameState)
+		// Отправка состояния игры всем игрокам
+		for id, player := range players {
+			data, err := json.Marshal(gameState)
 			if err != nil {
-				log.Println("Ошибка при отправке состояния игры:", err)
-				client.Close()
-				delete(clients, client)
+				log.Println("Ошибка при сериализации состояния игры:", err)
+				continue
+			}
+
+			// Пример использования переменной player
+			log.Printf("Отправка состояния игры игроку %d, координаты: (%.2f, %.2f)", player.ID, player.X, player.Y)
+
+			// Отправляем состояние игры игроку по его адресу
+			if addr, ok := clientAddrs[id]; ok {
+				_, err = conn.WriteToUDP(data, addr)
+				if err != nil {
+					log.Println("Ошибка при отправке состояния игроку:", err)
+				}
 			}
 		}
 
@@ -292,72 +318,52 @@ func gameLoop() {
 }
 
 func getPlayersState() []Player {
-	var playerList []Player
+	var playersState []Player
 	for _, player := range players {
-		playerList = append(playerList, *player)
+		playersState = append(playersState, *player)
 	}
-	return playerList
+	return playersState
 }
 
 func checkCapturePoints() {
 	for {
-		time.Sleep(100 * time.Millisecond)
-		mutex.Lock() // Блокируем доступ к данным
+		time.Sleep(1 * time.Second)
+
+		mutex.Lock()
 		for i := range capturePoints {
-			cp := &capturePoints[i]
-
-			player1InZone := isPlayerInZone(players[1], cp)
-			player2InZone := isPlayerInZone(players[2], cp)
-
-			if player1InZone && player2InZone {
-				cp.EnterTime = time.Time{} // Сброс таймера, если оба игрока в зоне
-			} else if player1InZone {
-				if cp.EnterTime.IsZero() {
-					cp.EnterTime = time.Now()
-				}
-				if time.Since(cp.EnterTime) >= 5*time.Second {
-					cp.IsCaptured = true
-					cp.CapturingPlayer = 1
-					cp.CaptureStart = time.Now()
-					cp.EnterTime = time.Time{} // Сброс таймера захвата
-				}
-			} else if player2InZone {
-				if cp.EnterTime.IsZero() {
-					cp.EnterTime = time.Now()
-				}
-				if time.Since(cp.EnterTime) >= 5*time.Second {
-					cp.IsCaptured = true
-					cp.CapturingPlayer = 2
-					cp.CaptureStart = time.Now()
-					cp.EnterTime = time.Time{} // Сброс таймера захвата
-				}
-			} else {
-				cp.EnterTime = time.Time{} // Сброс таймера, если игрок вышел из зоны
-			}
-
-			// Начисление очков за захваченные точки
-			if cp.IsCaptured {
-				if cp.CapturingPlayer == 1 {
-					if time.Since(cp.CaptureStart) >= 5*time.Second {
-						points1++
-						cp.CaptureStart = time.Now() // Обновляем время последнего начисления очков
-					}
-				} else if cp.CapturingPlayer == 2 {
-					if time.Since(cp.CaptureStart) >= 5*time.Second {
-						points2++
-						cp.CaptureStart = time.Now() // Обновляем время последнего начисления очков
+			capturePoint := &capturePoints[i]
+			if !capturePoint.IsCaptured {
+				for _, player := range players {
+					distance := math.Sqrt(math.Pow(player.X-capturePoint.X, 2) + math.Pow(player.Y-capturePoint.Y, 2))
+					if distance < capturePoint.Radius {
+						if capturePoint.CapturingPlayer == 0 {
+							capturePoint.CapturingPlayer = player.ID
+							capturePoint.EnterTime = time.Now()
+							log.Printf("Игрок %d вошел в зону захвата", player.ID)
+						} else if capturePoint.CapturingPlayer == player.ID {
+							if time.Since(capturePoint.EnterTime) > 5*time.Second {
+								capturePoint.IsCaptured = true
+								log.Printf("Игрок %d захватил точку", player.ID)
+								if player.ID == 1 {
+									points1++
+								} else {
+									points2++
+								}
+							}
+						} else {
+							capturePoint.CapturingPlayer = player.ID
+							capturePoint.EnterTime = time.Now()
+							log.Printf("Игрок %d захватил точку", player.ID)
+						}
+						break
 					}
 				}
+			} else if capturePoint.IsCaptured && capturePoint.CapturingPlayer != 0 {
+				capturePoint.CapturingPlayer = 0
+				capturePoint.EnterTime = time.Time{}
+				log.Printf("Точка захвата потеряна")
 			}
-
 		}
 		mutex.Unlock()
 	}
-}
-func isPlayerInZone(player *Player, cp *CapturePoint) bool {
-	if player == nil {
-		return false
-	}
-	distance := math.Sqrt(math.Pow(player.X-cp.X, 2) + math.Pow(player.Y-cp.Y, 2))
-	return distance <= cp.Radius
 }

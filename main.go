@@ -18,13 +18,14 @@ type Player struct {
 }
 
 type CapturePoint struct {
-	X               float64   `json:"x"`
-	Y               float64   `json:"y"`
-	Radius          float64   `json:"radius"`
-	IsCaptured      bool      `json:"isCaptured"`
-	CapturingPlayer int       `json:"capturingPlayer"`
-	CaptureStart    time.Time `json:"captureStart"`
-	EnterTime       time.Time `json:"enterTime"`
+	X                      float64   `json:"x"`
+	Y                      float64   `json:"y"`
+	Radius                 float64   `json:"radius"`
+	IsCaptured             bool      `json:"isCaptured"`
+	CapturingPlayer        int       `json:"capturingPlayer"`
+	CurrentCapturingPlayer int       `json:"currentCapturingPlayer"` // Добавлен JSON-тег
+	CaptureStart           time.Time `json:"captureStart"`
+	EnterTime              time.Time `json:"enterTime"`
 }
 
 type GameState struct {
@@ -41,6 +42,7 @@ var (
 	capturePoints = []CapturePoint{
 		{X: 300, Y: 200, Radius: 50},
 		{X: 800, Y: 600, Radius: 50},
+		{X: 550, Y: 400, Radius: 50},
 	}
 	points1 = 0
 	points2 = 0
@@ -283,7 +285,7 @@ func applyPull(player *Player) {
 
 func gameLoop() {
 	for {
-		time.Sleep(16 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		mutex.Lock()
 
 		gameState := GameState{
@@ -336,30 +338,42 @@ func checkCapturePoints() {
 			player1InZone := isPlayerInZone(players[1], cp)
 			player2InZone := isPlayerInZone(players[2], cp)
 
+			// Если оба игрока в зоне, сбрасываем таймер и текущего захватывающего игрока
 			if player1InZone && player2InZone {
-				cp.EnterTime = time.Time{} // Сброс таймера, если оба игрока в зоне
+				cp.EnterTime = time.Time{}    // Сброс таймера, если оба игрока в зоне
+				cp.CurrentCapturingPlayer = 0 // Никто не захватывает
 			} else if player1InZone {
+				// Игрок 1 в зоне, обновляем CurrentCapturingPlayer
+				cp.CurrentCapturingPlayer = 1
 				if cp.EnterTime.IsZero() {
 					cp.EnterTime = time.Now()
 				}
 				if time.Since(cp.EnterTime) >= 5*time.Second {
-					cp.IsCaptured = true
-					cp.CapturingPlayer = 1
-					cp.CaptureStart = time.Now()
-					cp.EnterTime = time.Time{} // Сброс таймера захвата
+					if !cp.IsCaptured || cp.CapturingPlayer != 1 {
+						cp.IsCaptured = true
+						cp.CapturingPlayer = 1
+						cp.CaptureStart = time.Now()
+						cp.EnterTime = time.Time{} // Сброс таймера захвата
+					}
 				}
 			} else if player2InZone {
+				// Игрок 2 в зоне, обновляем CurrentCapturingPlayer
+				cp.CurrentCapturingPlayer = 2
 				if cp.EnterTime.IsZero() {
 					cp.EnterTime = time.Now()
 				}
 				if time.Since(cp.EnterTime) >= 5*time.Second {
-					cp.IsCaptured = true
-					cp.CapturingPlayer = 2
-					cp.CaptureStart = time.Now()
-					cp.EnterTime = time.Time{} // Сброс таймера захвата
+					if !cp.IsCaptured || cp.CapturingPlayer != 2 {
+						cp.IsCaptured = true
+						cp.CapturingPlayer = 2
+						cp.CaptureStart = time.Now()
+						cp.EnterTime = time.Time{} // Сброс таймера захвата
+					}
 				}
 			} else {
-				cp.EnterTime = time.Time{} // Сброс таймера, если игрок вышел из зоны
+				// Никто не находится в зоне захвата, сбрасываем текущего захватывающего игрока
+				cp.EnterTime = time.Time{}    // Сброс таймера
+				cp.CurrentCapturingPlayer = 0 // Никто не захватывает
 			}
 
 			// Начисление очков за захваченные точки
@@ -379,9 +393,7 @@ func checkCapturePoints() {
 		}
 
 		mutex.Unlock()
-
 	}
-
 }
 func isPlayerInZone(player *Player, cp *CapturePoint) bool {
 	if player == nil {

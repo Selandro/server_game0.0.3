@@ -13,8 +13,11 @@ type Player struct {
 	ID           int       `json:"id"`
 	X            float64   `json:"x"`
 	Y            float64   `json:"y"`
+	FlipX        bool      `json:"flipX"`
 	LastPushTime time.Time // Время последнего действия "push"
 	LastPullTime time.Time // Время последнего действия "pull"
+	Name         string    `json:"name"` // Добавляем JSON-тег для имени
+	Skin         string    `json:"skin"` // Добавляем JSON-тег для скина
 }
 
 type CapturePoint struct {
@@ -91,9 +94,11 @@ func handleUDPMessage(addr *net.UDPAddr, msg map[string]interface{}) {
 		mutex.Lock()
 		playerID = len(players) + 1
 		players[playerID] = &Player{
-			ID: playerID,
-			X:  400,
-			Y:  400,
+			ID:   playerID,
+			X:    400,
+			Y:    400,
+			Name: msg["name"].(string),
+			Skin: msg["skin"].(string),
 		}
 		clientAddrs[playerID] = addr // Сохраняем адрес клиента
 		log.Printf("Игрок %d подключился", playerID)
@@ -115,6 +120,9 @@ func handleUDPMessage(addr *net.UDPAddr, msg map[string]interface{}) {
 	}
 	if y, ok := msg["y"].(float64); ok {
 		player.Y = y
+	}
+	if flipX, ok := msg["flipX"].(bool); ok {
+		player.FlipX = flipX
 	}
 	if action, ok := msg["action"].(string); ok {
 		handleAction(player, action)
@@ -304,7 +312,7 @@ func gameLoop() {
 			}
 
 			// Пример использования переменной player
-			log.Printf("Отправка состояния игры игроку %d, координаты: (%.2f, %.2f)", player.ID, player.X, player.Y)
+			log.Printf("Отправка состояния игры игроку %d, координаты: (%.2f, %.2f,%s)", player.ID, player.X, player.Y, player.FlipX)
 
 			// Отправляем состояние игры игроку по его адресу
 			if addr, ok := clientAddrs[id]; ok {
